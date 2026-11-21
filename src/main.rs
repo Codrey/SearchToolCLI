@@ -5,6 +5,7 @@ use std::path::{Path,PathBuf};
 use std::process;
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 struct SearchConfig {
     query: String,
@@ -163,5 +164,25 @@ fn main() {
         .unwrap_or(4);
     
     let shared_query = Arc::new(config);
-    let _total = search_concurrent(files, shared_query, thread_count);
+
+    let serial_files = files.clone();
+    let serial_start = Instant::now();
+    let serial_total = search_concurrent(serial_files, Arc::clone(&shared_query), 1);
+    let serial_elapsed = serial_start.elapsed();
+
+    let parallel_start = Instant::now();
+    let parallel_total = search_concurrent(files, Arc::clone(&shared_query), thread_count);
+    let parallel_elapsed = parallel_start.elapsed();
+
+    eprintln!(
+        "Single_thread (1 thread): {} matches in {:?}",
+        serial_total, serial_elapsed
+    );
+
+    eprintln!(
+        "Multithreaded ({} threads): {} matches in {:?}",
+        thread_count, parallel_total, parallel_elapsed
+    );
+
+    // let _total = search_concurrent(files, shared_query, thread_count);
 }
