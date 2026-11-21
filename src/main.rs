@@ -45,9 +45,12 @@ fn search_file(path: &Path, query: &str) -> io::Result<Vec<String>> {
         line_num += 1;
 
         let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
-        if trimmed.contains(query) {
+        let matched = query
+            .split('|')
+            .any(|part| !part.is_empty() && trimmed.contains(part));
+
+        if matched {
             hits.push(format!("{}:{}:{}", path.display(), line_num, trimmed));
-            // matches += 1;
         }
     }
 
@@ -127,9 +130,4 @@ fn main() {
     let shared_query = Arc::new(query);
     let _total = search_concurrent(files, shared_query, thread_count);
 
-    // let path = Path::new(&target);
-    // if let Err(err) = search_file(path, &query) {
-    //     eprintln!("Error search {}: {}", path.display(), err);
-    //     process::exit(1);
-    // }
 }
