@@ -6,6 +6,11 @@ use std::process;
 use std::sync::Arc;
 use std::thread;
 
+struct SearchConfig {
+    query: String,
+    case_insensitive: bool,
+}
+
 fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     let metadata = fs::metadata(path)?;
     if metadata.is_file() {
@@ -29,7 +34,20 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-fn search_file(path: &Path, query: &str) -> io::Result<Vec<String>> {
+fn line_matches(trimmed: &str, config: &SearchConfig) -> bool {
+    if config.case_insensitive {
+        let lower_line = trimmed.to_lowercase();
+        config.query.split('|').any(|part| {
+            !part.is_empty() && lower_line.contains(&part.to_lowercase())
+        })
+    } else {
+        config.query
+            .split('|')
+            .any(|part| !part.is_empty() && trimmed.contains(part))
+    }
+}
+
+fn search_file(path: &Path, config: &SearchConfig) -> io::Result<Vec<String>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
@@ -45,11 +63,7 @@ fn search_file(path: &Path, query: &str) -> io::Result<Vec<String>> {
         line_num += 1;
 
         let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
-        let matched = query
-            .split('|')
-            .any(|part| !part.is_empty() && trimmed.contains(part));
-
-        if matched {
+        if line_matches(trimmed, config) {
             hits.push(format!("{}:{}:{}", path.display(), line_num, trimmed));
         }
     }
@@ -57,7 +71,11 @@ fn search_file(path: &Path, query: &str) -> io::Result<Vec<String>> {
     Ok(hits)
 }
 
-fn search_concurrent(files: Vec<PathBuf>, query: Arc<String>, num_threads: usize) -> usize {
+fn search_concurrent(files: Vec<PathBuf>, config: Arc<SearchConfig>, num_threads: usize) -> usize {
+    if files.is_empty() {
+        return 0;
+    }
+    
     let worker_count = num_threads.max(1).min(files.len().max(1));
     let chunk_size = (files.len() + worker_count - 1) / worker_count;
 
@@ -72,11 +90,11 @@ fn search_concurrent(files: Vec<PathBuf>, query: Arc<String>, num_threads: usize
 
     let mut handles = Vec::with_capacity(chunks.len());
     for batch in chunks {
-        let query_ref = Arc::clone(&query);
+        let cfg = Arc::clone(&config);
         let handle = thread::spawn(move || {
             let mut local_hits = Vec::new();
             for file_path in batch {
-                match search_file(&file_path, query_ref.as_str()) {
+                match search_file(&file_path, cfg.as_ref()) {
                     Ok(mut file_hits) => local_hits.append(&mut file_hits),
                     Err(err) => eprintln!("Error search {}: {}", file_path.display(), err),
                 }
@@ -99,19 +117,36 @@ fn search_concurrent(files: Vec<PathBuf>, query: Arc<String>, num_threads: usize
     total_matches
 }
 
-fn main() {
-    let mut args = env::args().skip(1);
-    let query = match args.next() {
-        Some(q) => q,
-        None => {
-            eprintln!("Usage: SearchToolCLI <pattern> <file_or_dir>");
-            process::exit(2);
+fn parse_args() -> Result<(SearchConfig, String), &'static str> {
+    let mut case_insensitive = false;
+    let mut positional: Vec<String> = Vec::new();
+
+    for arg in env::args().skip(1) {
+        if arg.trim() == "-i" {
+            case_insensitive = true;
+        } else {
+            positional.push(arg);
         }
-    };
-    let target = match args.next() {
-        Some(t) => t,
-        None => {
-            eprintln!("Usage: SearchToolCLI <pattern> <file_or_dir>");
+    }
+
+    if positional.len() < 2 {
+        return Err("Usage: SearchToolsCLI [-i] <pattern> <file_or_dir>");
+    }
+
+    Ok((
+        SearchConfig {
+            query: positional[0].clone(),
+            case_insensitive,
+        },
+        positional[1].clone(),
+    ))
+}
+
+fn main() {
+    let (config, target) = match parse_args() {
+        Ok(parsed) => parsed,
+        Err(usage) => {
+            eprintln!("{}", usage);
             process::exit(2);
         }
     };
@@ -127,7 +162,6 @@ fn main() {
         .map(|n| n.get())
         .unwrap_or(4);
     
-    let shared_query = Arc::new(query);
+    let shared_query = Arc::new(config);
     let _total = search_concurrent(files, shared_query, thread_count);
-
 }
