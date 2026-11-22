@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path,PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -143,7 +143,74 @@ fn parse_args() -> Result<(SearchConfig, String), &'static str> {
     ))
 }
 
+fn ensure_powershell_shortcuts() {
+    let Ok(exe_path) = env::current_exe() else {
+        return;
+    };
+    let exe_str = exe_path.to_string_lossy().replace('\'', "''");
+
+    let Ok(user_profile) = env::var("USERPROFILE") else {
+        return;
+    };
+
+    let target_profile = PathBuf::from(&user_profile)
+        .join("Documents")
+        .join("WindowsPowerShell")
+        .join("Microsoft.PowerShell_profile.ps1");
+
+    let marker = "# >>> SearchToolCLI st/ST <<<";
+    if let Ok(existing) = fs::read_to_string(&target_profile) {
+        if existing.contains(marker) {
+            return;
+        }
+    }
+
+    if let Some(parent) = target_profile.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!("Warning: could not create profile directory {}: {}", parent.display(), err);
+            return;
+        }
+    }
+    let snippet = format!(
+    "\n{marker}\n\
+    function st {{\n\
+        $exe = '{exe_str}'\n\
+        if (-not (Test-Path -LiteralPath $exe)) {{\n\
+            Write-Error \"Executable not found: $exe\"\n\
+            return\n\
+        }}\n\n\
+        & $exe @args | ForEach-Object {{\n\
+            if ($_ -match '^(.+?):(\\d+):(.*)$') {{\n\
+                [PSCustomObject]@{{\n\
+                    File = Split-Path -Leaf $matches[1]\n\
+                    Line = [int]$matches[2]\n\
+                    Text = $matches[3].Trim()\n\
+                }}\n\
+            }}\n\
+        }} | Format-Table -Property File, Line, Text -AutoSize -Wrap\n\
+    }}\n\
+    # <<< SearchToolCLI st/ST <<<\n"
+    );
+
+    match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target_profile)
+    {
+        Ok(mut file) => {
+            if let Err(err) = file.write_all(snippet.as_bytes()) {
+                eprintln!("Warning: could not write to {}: {}", target_profile.display(), err);
+            }
+        }
+        Err(err) => {
+            eprintln!("Warning: could not open {}: {}", target_profile.display(), err);
+        }
+    }
+}
+
 fn main() {
+    ensure_powershell_shortcuts();
+
     let (config, target) = match parse_args() {
         Ok(parsed) => parsed,
         Err(usage) => {
