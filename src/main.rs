@@ -1,8 +1,8 @@
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Write};
-use std::path::{Path,PathBuf};
-use std::process;
+use std::io::{self, BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{self, Command};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -143,6 +143,7 @@ fn parse_args() -> Result<(SearchConfig, String), &'static str> {
     ))
 }
 
+// pwshll short cut installer and table output
 fn ensure_powershell_shortcuts() {
     let Ok(exe_path) = env::current_exe() else {
         return;
@@ -158,53 +159,50 @@ fn ensure_powershell_shortcuts() {
         .join("WindowsPowerShell")
         .join("Microsoft.PowerShell_profile.ps1");
 
-    let marker = "# >>> SearchToolCLI st/ST <<<";
+    let marker = "# >>> SearchToolCLI s4/S4 <<<";
+
     if let Ok(existing) = fs::read_to_string(&target_profile) {
         if existing.contains(marker) {
             return;
         }
     }
 
-    if let Some(parent) = target_profile.parent() {
-        if let Err(err) = fs::create_dir_all(parent) {
-            eprintln!("Warning: could not create profile directory {}: {}", parent.display(), err);
-            return;
-        }
-    }
-    let snippet = format!(
-    "\n{marker}\n\
-    function st {{\n\
-        $exe = '{exe_str}'\n\
-        if (-not (Test-Path -LiteralPath $exe)) {{\n\
-            Write-Error \"Executable not found: $exe\"\n\
-            return\n\
-        }}\n\n\
-        & $exe @args | ForEach-Object {{\n\
-            if ($_ -match '^(.+?):(\\d+):(.*)$') {{\n\
-                [PSCustomObject]@{{\n\
-                    File = Split-Path -Leaf $matches[1]\n\
-                    Line = [int]$matches[2]\n\
-                    Text = $matches[3].Trim()\n\
-                }}\n\
-            }}\n\
-        }} | Format-Table -Property File, Line, Text -AutoSize -Wrap\n\
-    }}\n\
-    # <<< SearchToolCLI st/ST <<<\n"
+    let profile_str = target_profile.to_string_lossy().replace('\'', "''");
+    let block = format!(
+        "\r\n{marker}\r\n\
+function s4 {{\r\n\
+    $exe = '{exe_str}'\r\n\
+    if (-not (Test-Path -LiteralPath $exe)) {{ Write-Error \"Executable not found: $exe\"; return }}\r\n\
+    & $exe @args | ForEach-Object {{\r\n\
+        if ($_ -match '^(.+?):(\\d+):(.*)$') {{\r\n\
+            [PSCustomObject]@{{ File = Split-Path -Leaf $matches[1]; Line = [int]$matches[2]; Text = $matches[3].Trim() }}\r\n\
+        }}\r\n\
+    }} | Format-Table -Property File, Line, Text -AutoSize -Wrap\r\n\
+}}\r\n\
+# <<< SearchToolCLI s4/S4 <<<\r\n"
     );
 
-    match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&target_profile)
+    let block_escaped = block.replace('\'', "''");
+    let ps_cmd = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         $p = '{profile_str}'; \
+         $dir = Split-Path -Parent $p; \
+         if (-not (Test-Path -LiteralPath $dir)) {{ New-Item -ItemType Directory -Path $dir -Force | Out-Null }}; \
+         Add-Content -LiteralPath $p -Value '{block_escaped}' -Encoding UTF8"
+    );
+
+    match Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+        .output()
     {
-        Ok(mut file) => {
-            if let Err(err) = file.write_all(snippet.as_bytes()) {
-                eprintln!("Warning: could not write to {}: {}", target_profile.display(), err);
-            }
+        Ok(output) if !output.status.success() => {
+            let err_msg = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Warning: PowerShell profile install failed: {}", err_msg.trim());
         }
         Err(err) => {
-            eprintln!("Warning: could not open {}: {}", target_profile.display(), err);
+            eprintln!("Warning: could not launch powershell.exe: {}", err);
         }
+        _ => {}
     }
 }
 
@@ -250,6 +248,4 @@ fn main() {
         "Multithreaded ({} threads): {} matches in {:?}",
         thread_count, parallel_total, parallel_elapsed
     );
-
-    // let _total = search_concurrent(files, shared_query, thread_count);
 }
